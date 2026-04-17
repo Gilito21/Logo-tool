@@ -111,7 +111,7 @@
 </div>
 <div id="toast"></div>
 <script>
-const API = "https://logo-tool-production.up.railway.app";
+const API = "https://logo-tool.onrender.com";
 let state = {};
 function toast(msg, duration = 2800) { const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), duration); }
 function setProgress(pct, label) { document.getElementById("progressFill").style.width = pct + "%"; document.getElementById("progressLabel").textContent = label; }

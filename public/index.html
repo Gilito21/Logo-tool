@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>M&A Logo Collector</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root { --bg: #f5f6f8; --surface: #ffffff; --border: #e2e6ea; --primary: #1a56db; --primary-hover: #1648c0; --text: #111827; --muted: #6b7280; --danger: #dc2626; --success: #16a34a; --warn: #d97706; --radius: 10px; --shadow: 0 1px 4px rgba(0,0,0,.08); --shadow-md: 0 4px 16px rgba(0,0,0,.1); }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .app { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; }
+  header svg { color: var(--primary); }
+  header h1 { font-size: 1.5rem; font-weight: 700; }
+  header p { font-size: .85rem; color: var(--muted); margin-top: 2px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 24px; box-shadow: var(--shadow); }
+  .panel h2 { font-size: 1rem; font-weight: 600; margin-bottom: 14px; }
+  textarea { width: 100%; height: 130px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; font-size: .9rem; font-family: inherit; color: var(--text); background: var(--bg); outline: none; transition: border-color .15s; }
+  textarea:focus { border-color: var(--primary); }
+  .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px; font-size: .875rem; font-weight: 500; cursor: pointer; border: 1px solid transparent; transition: all .15s; white-space: nowrap; }
+  .btn-primary { background: var(--primary); color: #fff; }
+  .btn-primary:hover { background: var(--primary-hover); }
+  .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-outline { background: var(--surface); border-color: var(--border); color: var(--text); }
+  .btn-outline:hover { background: var(--bg); }
+  .btn-outline:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-sm { padding: 5px 11px; font-size: .8rem; }
+  .progress-wrap { margin: 16px 0 0; display: none; }
+  .progress-wrap.visible { display: block; }
+  .progress-bar { height: 4px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--primary); border-radius: 4px; transition: width .3s ease; width: 0%; }
+  .progress-label { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+  .grid-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .grid-header h2 { font-size: 1rem; font-weight: 600; }
+  .grid-count { font-size: .82rem; color: var(--muted); }
+  .logo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; display: flex; flex-direction: column; transition: box-shadow .15s; }
+  .card:hover { box-shadow: var(--shadow-md); }
+  .card-preview { height: 140px; display: flex; align-items: center; justify-content: center; background: #f9fafb; border-bottom: 1px solid var(--border); padding: 16px; }
+  .card-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .card-preview .placeholder { color: var(--muted); font-size: .8rem; text-align: center; }
+  .card-body { padding: 12px 14px; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+  .card-name { font-size: .88rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card-domain input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 3px 7px; font-size: .75rem; color: var(--muted); outline: none; }
+  .card-domain input:focus { border-color: var(--primary); }
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 20px; font-size: .72rem; font-weight: 600; }
+  .badge-found { background: #dcfce7; color: var(--success); }
+  .badge-multi { background: #fef9c3; color: #854d0e; }
+  .badge-review { background: #fff7ed; color: var(--warn); }
+  .badge-failed { background: #fef2f2; color: var(--danger); }
+  .badge-loading { background: #eff6ff; color: var(--primary); }
+  .badge-cached { background: #f0fdf4; color: #166534; }
+  .card-actions { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 14px 12px; border-top: 1px solid var(--border); }
+  .candidates-wrap { padding: 0 14px 12px; }
+  .candidates-label { font-size: .75rem; color: var(--muted); margin-bottom: 6px; }
+  .candidates-scroll { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+  .cand-thumb { width: 56px; height: 56px; border: 2px solid var(--border); border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; background: #f9fafb; flex-shrink: 0; transition: border-color .15s; overflow: hidden; }
+  .cand-thumb:hover { border-color: var(--primary); }
+  .cand-thumb.selected { border-color: var(--primary); box-shadow: 0 0 0 2px #bfdbfe; }
+  .cand-thumb img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  #toast { position: fixed; bottom: 24px; right: 24px; background: #111827; color: #fff; padding: 10px 18px; border-radius: 8px; font-size: .85rem; opacity: 0; transform: translateY(10px); transition: all .25s; pointer-events: none; z-index: 999; }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty svg { margin: 0 auto 16px; display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { width: 14px; height: 14px; border: 2px solid #bfdbfe; border-top-color: var(--primary); border-radius: 50%; animation: spin .6s linear infinite; }
+  .section { display: none; }
+  .section.visible { display: block; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/>
+      <rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>
+    </svg>
+    <div><h1>M&A Logo Collector</h1><p>Extract logos directly from company websites · M&A Research Tool</p></div>
+  </header>
+  <div class="panel">
+    <h2>Company List</h2>
+    <textarea id="companyInput" placeholder="Paste company names, one per line:&#10;Apple&#10;Microsoft&#10;Stripe&#10;Notion"></textarea>
+    <div class="actions">
+      <button class="btn btn-primary" id="fetchBtn" onclick="startFetch()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        Fetch Logos
+      </button>
+      <button class="btn btn-outline" id="bulkBtn" onclick="bulkDownload()" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Bulk Download (ZIP)
+      </button>
+      <button class="btn btn-outline" onclick="clearAll()">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+        Clear All
+      </button>
+    </div>
+    <div class="progress-wrap" id="progressWrap">
+      <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+      <div class="progress-label" id="progressLabel">Processing…</div>
+    </div>
+  </div>
+  <div class="section" id="resultsSection">
+    <div class="grid-header"><h2>Results</h2><span class="grid-count" id="gridCount"></span></div>
+    <div class="logo-grid" id="logoGrid"></div>
+  </div>
+  <div class="empty" id="emptyState">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
+    <p>Paste company names above and click <strong>Fetch Logos</strong> to get started.</p>
+  </div>
+</div>
+<div id="toast"></div>
+<script>
+const API = "https://logo-tool-production.up.railway.app";
+let state = {};
+function toast(msg, duration = 2800) { const t = document.getElementById("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), duration); }
+function setProgress(pct, label) { document.getElementById("progressFill").style.width = pct + "%"; document.getElementById("progressLabel").textContent = label; }
+function slugify(s) { return s.toLowerCase().replace(/[^a-z0-9]/g, "_"); }
+async function api(path, body) { const r = await fetch(API + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); return r.json(); }
+async function startFetch() {
+  const raw = document.getElementById("companyInput").value.trim();
+  if (!raw) return toast("Please paste at least one company name.");
+  const names = [...new Set(raw.split("\n").map(s => s.trim()).filter(Boolean))];
+  if (names.length > 50) return toast("Maximum 50 companies at once.");
+  document.getElementById("fetchBtn").disabled = true;
+  document.getElementById("progressWrap").classList.add("visible");
+  document.getElementById("resultsSection").classList.add("visible");
+  document.getElementById("emptyState").style.display = "none";
+  state = {};
+  names.forEach(n => { state[n] = { name: n, domain: "", status: "loading", candidates: [], selectedUrl: null, cachedPath: null }; });
+  renderGrid();
+  let db = {};
+  try { db = await fetch(API + "/api/cache").then(r => r.json()); } catch {}
+  for (let i = 0; i < names.length; i++) {
+    const name = names[i];
+    setProgress(Math.round((i / names.length) * 100), `Fetching ${name}… (${i + 1}/${names.length})`);
+    const key = name.toLowerCase().trim();
+    if (db[key]) { state[name] = { name, domain: db[key].domain, status: "cached", candidates: [], selectedUrl: db[key].cachedPath, cachedPath: db[key].cachedPath }; renderCard(name); continue; }
+    try { const { domain } = await api("/api/resolve-domain", { name }); state[name].domain = domain; } catch { state[name].status = "failed"; renderCard(name); continue; }
+    try {
+      const res = await api("/api/fetch-logos", { domain: state[name].domain, name });
+      if (res.fromCache) { state[name].status = "cached"; state[name].selectedUrl = res.cached.cachedPath; state[name].cachedPath = res.cached.cachedPath; }
+      else if (!res.candidates || res.candidates.length === 0) { state[name].status = "failed"; }
+      else { state[name].candidates = res.candidates; state[name].selectedUrl = res.candidates[0].url; state[name].status = res.candidates.length === 1 ? "found" : "multi"; }
+    } catch { state[name].status = "failed"; }
+    renderCard(name);
+  }
+  setProgress(100, `Done — ${names.length} companies processed.`);
+  document.getElementById("fetchBtn").disabled = false;
+  updateBulkBtn(); updateGridCount();
+}
+function renderGrid() { const grid = document.getElementById("logoGrid"); grid.innerHTML = ""; Object.keys(state).forEach(name => { const div = document.createElement("div"); div.id = `card-${slugify(name)}`; div.className = "card"; grid.appendChild(div); renderCard(name); }); updateGridCount(); }
+function renderCard(name) {
+  const s = state[name]; const id = slugify(name); const el = document.getElementById(`card-${id}`); if (!el) return;
+  const badgeMap = { loading: ["badge-loading","● Processing"], found: ["badge-found","✓ Found"], multi: ["badge-multi","⚡ Multiple candidates"], review: ["badge-review","⚠ Needs review"], failed: ["badge-failed","✗ Failed"], cached: ["badge-cached","✓ Cached"] };
+  const [badgeCls, badgeTxt] = badgeMap[s.status] || badgeMap.review;
+  let previewHtml = `<div class="placeholder">No logo found</div>`;
+  if (s.status === "loading") previewHtml = `<div class="spinner"></div>`;
+  else if (s.selectedUrl) { const src = s.selectedUrl.startsWith("/") ? API + s.selectedUrl : s.selectedUrl; previewHtml = `<img src="${src}" onerror="this.parentElement.innerHTML='<div class=placeholder>Load error</div>'" alt="${name} logo" />`; }
+  let candidatesHtml = "";
+  if (s.candidates && s.candidates.length > 1) {
+    candidatesHtml = `<div class="candidates-wrap"><div class="candidates-label">Select the correct logo:</div><div class="candidates-scroll">${s.candidates.map((c, i) => { const csrc = c.url.startsWith("/") ? API + c.url : c.url; return `<div class="cand-thumb ${s.selectedUrl === c.url ? "selected" : ""}" title="${c.label}" onclick="selectCandidate('${name}', ${i})"><img src="${csrc}" onerror="this.style.display='none'" /></div>`; }).join("")}</div></div>`;
+  }
+  const hasLogo = !!s.selectedUrl;
+  const actionsHtml = `<div class="card-actions">${hasLogo ? `<button class="btn btn-outline btn-sm" onclick="copyLogo('${name}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy</button><button class="btn btn-outline btn-sm" onclick="downloadPng('${name}')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Download PNG</button>${!s.cachedPath ? `<button class="btn btn-primary btn-sm" onclick="saveLogo('${name}')">Save</button>` : ""}` : ""}<label class="btn btn-outline btn-sm"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>Upload<input type="file" accept="image/*" onchange="handleUpload('${name}', this)" /></label></div>`;
+  el.innerHTML = `<div class="card-preview">${previewHtml}</div><div class="card-body"><div class="card-name" title="${name}">${name}</div><div class="card-domain"><input id="domain-${id}" type="text" value="${s.domain}" placeholder="company.com" onblur="updateDomain('${name}', this.value)" /></div><span class="badge ${badgeCls}">${badgeTxt}</span></div>${candidatesHtml}${actionsHtml}`;
+}
+function updateGridCount() { const total = Object.keys(state).length; const found = Object.values(state).filter(s => s.selectedUrl).length; document.getElementById("gridCount").textContent = `${found} / ${total} logos found`; }
+function selectCandidate(name, idx) { state[name].selectedUrl = state[name].candidates[idx].url; state[name].status = "review"; renderCard(name); }
+function updateDomain(name, domain) { if (state[name]) state[name].domain = domain.trim(); }
+async function saveLogo(name) { const s = state[name]; if (!s.selectedUrl) return; toast(`Saving ${name}…`); try { const res = await api("/api/cache-logo", { name, domain: s.domain, imageUrl: s.selectedUrl }); if (res.success) { state[name].cachedPath = res.cachedPath; state[name].selectedUrl = res.cachedPath; state[name].status = "cached"; renderCard(name); toast(`✓ ${name} saved to cache`); updateBulkBtn(); } } catch { toast("Save failed"); } }
+async function downloadPng(name) { const s = state[name]; if (!s.selectedUrl) return; toast(`Preparing PNG for ${name}…`); try { const r = await fetch(API + "/api/download-png", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl: s.selectedUrl.startsWith("/") ? API + s.selectedUrl : s.selectedUrl, name }) }); const blob = await r.blob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${slugify(name)}.png`; a.click(); URL.revokeObjectURL(a.href); } catch { toast("Download failed"); } }
+async function copyLogo(name) { const s = state[name]; if (!s.selectedUrl) return; try { const src = s.selectedUrl.startsWith("/") ? API + s.selectedUrl : s.selectedUrl; const r = await fetch(src); const blob = await r.blob(); const bmp = await createImageBitmap(blob); const canvas = document.createElement("canvas"); canvas.width = bmp.width; canvas.height = bmp.height; canvas.getContext("2d").drawImage(bmp, 0, 0); canvas.toBlob(async pngBlob => { try { await navigator.clipboard.write([new ClipboardItem({ "image/png": pngBlob })]); toast(`✓ ${name} logo copied to clipboard`); } catch { toast("Clipboard access denied — try HTTPS or a modern browser"); } }, "image/png"); } catch { toast("Copy failed"); } }
+async function bulkDownload() { const ready = Object.values(state).filter(s => s.cachedPath); if (ready.length === 0) { toast("Save logos first, then bulk download."); return; } toast(`Building ZIP for ${ready.length} logos…`); try { const r = await fetch(API + "/api/bulk-download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ companies: ready.map(s => ({ name: s.name, cachedPath: s.cachedPath })) }) }); const blob = await r.blob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "logos.zip"; a.click(); URL.revokeObjectURL(a.href); toast("✓ ZIP downloaded"); } catch { toast("Bulk download failed"); } }
+function handleUpload(name, input) { const file = input.files[0]; if (!file) return; const reader = new FileReader(); reader.onload = e => { state[name].selectedUrl = e.target.result; state[name].status = "review"; state[name].candidates = []; renderCard(name); updateBulkBtn(); toast(`✓ Manual upload set for ${name}`); }; reader.readAsDataURL(file); }
+function updateBulkBtn() { document.getElementById("bulkBtn").disabled = !Object.values(state).some(s => s.cachedPath); }
+function clearAll() { if (!confirm("Clear all results?")) return; state = {}; document.getElementById("logoGrid").innerHTML = ""; document.getElementById("resultsSection").classList.remove("visible"); document.getElementById("emptyState").style.display = ""; document.getElementById("progressWrap").classList.remove("visible"); document.getElementById("companyInput").value = ""; document.getElementById("bulkBtn").disabled = true; }
+</script>
+</body>
+</html>

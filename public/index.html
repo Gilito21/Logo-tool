@@ -152,7 +152,7 @@ async function startFetch() {
 function renderGrid() { const grid = document.getElementById("logoGrid"); grid.innerHTML = ""; Object.keys(state).forEach(name => { const div = document.createElement("div"); div.id = `card-${slugify(name)}`; div.className = "card"; grid.appendChild(div); renderCard(name); }); updateGridCount(); }
 function renderCard(name) {
   const s = state[name]; const id = slugify(name); const el = document.getElementById(`card-${id}`); if (!el) return;
-  const sourceLabel = { clearbit: "Clearbit", wikipedia: "Wikipedia", "google-transparent": "Google Images", "duckduckgo-transparent": "DuckDuckGo" };
+  const sourceLabel = { clearbit: "Clearbit", brandfetch: "Brandfetch", wikipedia: "Wikipedia", "bing-transparent": "Bing Images", "google-transparent": "Google Images", "duckduckgo-transparent": "DuckDuckGo" };
   const foundLabel = s.source && sourceLabel[s.source] ? `✓ ${sourceLabel[s.source]}` : "✓ Found";
   const badgeMap = { loading: ["badge-loading","● Processing"], found: ["badge-found", foundLabel], multi: ["badge-multi","⚡ Multiple candidates"], review: ["badge-review","⚠ Needs review"], failed: ["badge-failed","✗ Failed"], cached: ["badge-cached","✓ Cached"] };
   const [badgeCls, badgeTxt] = badgeMap[s.status] || badgeMap.review;

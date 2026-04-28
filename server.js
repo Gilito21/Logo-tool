@@ -23,74 +23,178 @@ app.use(express.static(path.join(__dirname, "public")));
 function loadDB() { return JSON.parse(fs.readFileSync(DB_PATH, "utf-8")); }
 function saveDB(db) { fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2)); }
 
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
 };
 
-const httpsAgent = new https.Agent({ rejectUnauthorized: false });
+// ── Background removal via flood-fill from corners ────────────────────────────
+// Removes solid-color backgrounds (white, light gray, etc.) making logo transparent.
+async function removeBackground(inputBuffer) {
+  try {
+    const { data, info } = await sharp(inputBuffer)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+
+    const { width, height } = info;
+    const px = new Uint8Array(data);
+    const idx = (x, y) => (y * width + x) * 4;
+
+    const corners = [
+      [0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1],
+    ].map(([x, y]) => {
+      const i = idx(x, y);
+      return { r: px[i], g: px[i + 1], b: px[i + 2] };
+    });
+
+    // Only remove background if all corners agree on a near-uniform color
+    const avg = {
+      r: Math.round(corners.reduce((s, c) => s + c.r, 0) / 4),
+      g: Math.round(corners.reduce((s, c) => s + c.g, 0) / 4),
+      b: Math.round(corners.reduce((s, c) => s + c.b, 0) / 4),
+    };
+    const spread = corners.every(c =>
+      Math.abs(c.r - avg.r) < 15 && Math.abs(c.g - avg.g) < 15 && Math.abs(c.b - avg.b) < 15
+    );
+    // Skip if all corners are already transparent or background is very dark (likely intentional)
+    const allTransparent = corners.every((_, i) => { const ii = idx(corners[i < 2 ? 0 : i % 2 === 0 ? 2 : 3][0], corners[i < 2 ? 0 : i % 2 === 0 ? 2 : 3][1]); return px[ii + 3] < 10; });
+    if (!spread || allTransparent || (avg.r < 30 && avg.g < 30 && avg.b < 30)) return inputBuffer;
+
+    const thr = 30;
+    const match = (x, y) => {
+      const i = idx(x, y);
+      return px[i + 3] > 10 &&
+        Math.abs(px[i] - avg.r) < thr &&
+        Math.abs(px[i + 1] - avg.g) < thr &&
+        Math.abs(px[i + 2] - avg.b) < thr;
+    };
+
+    // Flood-fill from all 4 corners
+    const visited = new Uint8Array(width * height);
+    const queue = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]];
+    queue.forEach(([x, y]) => { visited[y * width + x] = 1; });
+
+    while (queue.length) {
+      const [x, y] = queue.pop();
+      px[idx(x, y) + 3] = 0;
+      for (const [nx, ny] of [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]]) {
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const ni = ny * width + nx;
+        if (visited[ni]) continue;
+        visited[ni] = 1;
+        if (match(nx, ny)) queue.push([nx, ny]);
+      }
+    }
+
+    return await sharp(Buffer.from(px), { raw: { width, height, channels: 4 } }).png().toBuffer();
+  } catch {
+    return inputBuffer;
+  }
+}
+
+async function toFinalBuffer(inputBuffer) {
+  const withoutBg = await removeBackground(inputBuffer);
+  return sharp(withoutBg, { density: 300 })
+    .png()
+    .resize(512, 512, { fit: "inside", background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .toBuffer();
+}
 
 // ── Source 1: Clearbit ────────────────────────────────────────────────────────
 async function fetchFromClearbit(domain) {
   const url = `https://logo.clearbit.com/${domain}?size=512`;
   try {
-    const resp = await axios.get(url, { responseType: "arraybuffer", timeout: 6000, validateStatus: s => s === 200, httpsAgent });
-    if (resp.data && resp.data.length > 500) return url;
+    const r = await axios.get(url, { responseType: "arraybuffer", timeout: 6000, validateStatus: s => s === 200, httpsAgent });
+    if (r.data && r.data.length > 500) return url;
   } catch {}
   return null;
 }
 
-// ── Source 2: Brandfetch CDN (no API key needed) ──────────────────────────────
+// ── Source 2: Brandfetch CDN ───────────────────────────────────────────────────
 async function fetchFromBrandfetch(domain) {
-  // Brandfetch CDN serves logos directly by domain
-  const urls = [
+  for (const url of [
     `https://cdn.brandfetch.io/${domain}/w/400/h/400/logo`,
     `https://cdn.brandfetch.io/${domain}/w/400/h/400/theme/dark/logo`,
-  ];
-  for (const url of urls) {
+  ]) {
     try {
-      const resp = await axios.get(url, { responseType: "arraybuffer", timeout: 6000, validateStatus: s => s === 200, httpsAgent });
-      if (resp.data && resp.data.length > 500) return url;
+      const r = await axios.get(url, { responseType: "arraybuffer", timeout: 6000, validateStatus: s => s === 200, httpsAgent });
+      if (r.data && r.data.length > 500) return url;
     } catch {}
   }
   return null;
 }
 
-// ── Source 3: Wikipedia infobox logo ─────────────────────────────────────────
+// ── Source 3: Simple Icons (SVGs for thousands of brands) ─────────────────────
+async function fetchFromSimpleIcons(companyName) {
+  const slug = companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const url = `https://cdn.simpleicons.org/${slug}`;
+  try {
+    const r = await axios.get(url, { timeout: 5000, validateStatus: s => s === 200, headers: BROWSER_HEADERS });
+    if (r.data && typeof r.data === "string" && r.data.includes("<svg")) return url;
+  } catch {}
+  return null;
+}
+
+// ── Source 4: SVG path hunting on the company domain ─────────────────────────
+async function fetchSVGFromDomain(domain) {
+  const paths = [
+    "/logo.svg", "/images/logo.svg", "/img/logo.svg", "/assets/logo.svg",
+    "/static/logo.svg", "/favicon.svg", "/assets/images/logo.svg",
+    "/static/images/logo.svg", "/dist/logo.svg", "/public/logo.svg",
+    "/media/logo.svg", "/content/logo.svg", "/theme/logo.svg",
+    "/wp-content/themes/logo.svg", "/brand/logo.svg",
+  ];
+  const results = await Promise.allSettled(
+    paths.map(async (p) => {
+      const url = `https://${domain}${p}`;
+      const r = await axios.get(url, {
+        timeout: 3000, validateStatus: s => s === 200, httpsAgent,
+        headers: { "User-Agent": "Mozilla/5.0 Chrome/120" },
+      });
+      const ct = r.headers["content-type"] || "";
+      if (ct.includes("svg") || (typeof r.data === "string" && r.data.trim().startsWith("<svg"))) return url;
+      throw new Error("not svg");
+    })
+  );
+  const found = results.find(r => r.status === "fulfilled");
+  return found ? found.value : null;
+}
+
+// ── Source 5: Wikipedia infobox logo ─────────────────────────────────────────
 async function fetchFromWikipedia(companyName) {
   try {
-    const searchResp = await axios.get("https://en.wikipedia.org/w/api.php", {
+    const s = await axios.get("https://en.wikipedia.org/w/api.php", {
       params: { action: "query", list: "search", srsearch: companyName, format: "json", srlimit: 3 },
       timeout: 7000,
     });
-    const results = searchResp.data?.query?.search;
+    const results = s.data?.query?.search;
     if (!results?.length) return null;
-    const pageTitle = results[0].title;
-    const pageResp = await axios.get("https://en.wikipedia.org/w/api.php", {
-      params: { action: "query", prop: "pageimages", titles: pageTitle, format: "json", pithumbsize: 512, piprop: "original|thumbnail" },
+    const p = await axios.get("https://en.wikipedia.org/w/api.php", {
+      params: { action: "query", prop: "pageimages", titles: results[0].title, format: "json", pithumbsize: 512, piprop: "original|thumbnail" },
       timeout: 7000,
     });
-    const page = Object.values(pageResp.data?.query?.pages || {})[0];
+    const page = Object.values(p.data?.query?.pages || {})[0];
     const src = page?.original?.source || page?.thumbnail?.source;
     if (src && /\.(svg|png)/i.test(src)) return src;
   } catch {}
   return null;
 }
 
-// ── Source 4: Bing Images with transparent filter (more scraper-friendly) ────
+// ── Source 6: Bing Images – transparent filter ────────────────────────────────
 async function fetchFromBingImages(companyName) {
   try {
-    const resp = await axios.get("https://www.bing.com/images/search", {
+    const r = await axios.get("https://www.bing.com/images/search", {
       params: { q: `${companyName} logo`, qft: "+filterui:photo-transparent", form: "IRFLTR" },
-      headers: { ...BROWSER_HEADERS, "Accept-Language": "en-US,en;q=0.9" },
+      headers: BROWSER_HEADERS,
       timeout: 10000,
     });
     const urls = [];
-    // Bing stores original image URL in the "murl" field inside JSON attributes
     const re = /"murl"\s*:\s*"(https?:\/\/(?!(?:www\.bing|tse\d*\.mm\.bing|msn\.com))[^"]{10,600})"/g;
     let m;
-    while ((m = re.exec(resp.data)) !== null) {
+    while ((m = re.exec(r.data)) !== null) {
       const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
       if (!urls.includes(u)) urls.push(u);
       if (urls.length >= 8) break;
@@ -99,26 +203,25 @@ async function fetchFromBingImages(companyName) {
   } catch { return []; }
 }
 
-// ── Source 5: Google Images with transparent filter ───────────────────────────
+// ── Source 7: Google Images – transparent filter ──────────────────────────────
 async function fetchFromGoogleImages(companyName) {
   try {
-    const resp = await axios.get("https://www.google.com/search", {
+    const r = await axios.get("https://www.google.com/search", {
       params: { q: `${companyName} logo`, tbm: "isch", tbs: "ic:trans", hl: "en", gl: "us" },
       headers: { ...BROWSER_HEADERS, "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+412; SOCS=CAISHAgBEhIaAB;" },
       timeout: 10000,
     });
     const urls = [];
-    // "ou" field = original URL in Google Images JSON blobs
     const re1 = /"ou"\s*:\s*"(https?:\/\/(?!(?:www\.google|encrypted-tbn|gstatic|doubleclick))[^"]+)"/g;
     let m;
-    while ((m = re1.exec(resp.data)) !== null) {
+    while ((m = re1.exec(r.data)) !== null) {
       const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
       if (!urls.includes(u)) urls.push(u);
       if (urls.length >= 8) break;
     }
     if (urls.length < 3) {
       const re2 = /"(https?:\/\/(?!(?:www\.google|encrypted-tbn|gstatic|doubleclick))[^"]{15,400}\.(?:png|svg)[^"]*)"/g;
-      while ((m = re2.exec(resp.data)) !== null) {
+      while ((m = re2.exec(r.data)) !== null) {
         const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
         if (!urls.includes(u)) urls.push(u);
         if (urls.length >= 8) break;
@@ -128,23 +231,21 @@ async function fetchFromGoogleImages(companyName) {
   } catch { return []; }
 }
 
-// ── Source 5: DuckDuckGo images with transparent filter ───────────────────────
+// ── Source 8: DuckDuckGo images – transparent filter ─────────────────────────
 async function fetchFromDuckDuckGo(companyName) {
   try {
-    const query = `${companyName} logo`;
-    const initResp = await axios.get("https://duckduckgo.com/", {
-      params: { q: query, iax: "images", ia: "images" },
-      headers: BROWSER_HEADERS,
-      timeout: 8000,
+    const init = await axios.get("https://duckduckgo.com/", {
+      params: { q: `${companyName} logo`, iax: "images", ia: "images" },
+      headers: BROWSER_HEADERS, timeout: 8000,
     });
-    const vqdMatch = initResp.data.match(/vqd=["']?([^"'&\s]+)["']?/);
-    if (!vqdMatch) return [];
-    const imgResp = await axios.get("https://duckduckgo.com/i.js", {
-      params: { q: query, vqd: vqdMatch[1], f: "type:transparent", p: 1 },
+    const vqd = (init.data.match(/vqd=["']?([^"'&\s]+)["']?/) || [])[1];
+    if (!vqd) return [];
+    const imgs = await axios.get("https://duckduckgo.com/i.js", {
+      params: { q: `${companyName} logo`, vqd, f: "type:transparent", p: 1 },
       headers: { ...BROWSER_HEADERS, Referer: "https://duckduckgo.com/" },
       timeout: 8000,
     });
-    return (imgResp.data?.results || []).slice(0, 6).map(r => r.image).filter(Boolean);
+    return (imgs.data?.results || []).slice(0, 6).map(r => r.image).filter(Boolean);
   } catch { return []; }
 }
 
@@ -175,8 +276,10 @@ function resolveUrl(base, rel) {
 }
 
 function scoreCandidate(url, context) {
-  if (context === "clearbit") return 220;
-  if (context === "brandfetch") return 210;
+  if (context === "clearbit") return 230;
+  if (context === "brandfetch") return 220;
+  if (context === "simpleicons") return 215;
+  if (context === "svg-path") return 210;
   if (context === "wikipedia") return 190;
   if (context === "bing-transparent") return 160;
   if (context === "google-transparent") return 150;
@@ -193,43 +296,32 @@ function scoreCandidate(url, context) {
   return score;
 }
 
-async function scrapeWebsite(domain, name, addCandidate, resolveUrl) {
+async function scrapeWebsite(domain, name, addCandidate) {
   const baseUrl = `https://${domain}`;
-  let html = "";
-  let finalUrl = baseUrl;
+  let html = "", finalUrl = baseUrl;
   try {
-    const resp = await axios.get(baseUrl, {
-      timeout: 8000, maxRedirects: 5, httpsAgent,
-      headers: { "User-Agent": "Mozilla/5.0 Chrome/120", Accept: "text/html" },
-    });
-    html = resp.data;
-    finalUrl = resp.request?.res?.responseUrl || baseUrl;
+    const r = await axios.get(baseUrl, { timeout: 8000, maxRedirects: 5, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120", Accept: "text/html" } });
+    html = r.data; finalUrl = r.request?.res?.responseUrl || baseUrl;
   } catch {
-    try {
-      const resp = await axios.get(`http://${domain}`, { timeout: 8000, maxRedirects: 5, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } });
-      html = resp.data;
-      finalUrl = resp.request?.res?.responseUrl || `http://${domain}`;
-    } catch {}
+    try { const r = await axios.get(`http://${domain}`, { timeout: 8000, maxRedirects: 5, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); html = r.data; finalUrl = r.request?.res?.responseUrl || `http://${domain}`; } catch {}
   }
   if (!html) return;
 
-  // If the domain redirected to a completely different host, skip website scraping
-  // to avoid picking up the parent company's logo
+  // If redirected to a different domain, only look for company-name-specific images
   try {
     const finalHost = new URL(finalUrl).hostname.replace(/^www\./, "");
-    const originalHost = domain.replace(/^www\./, "");
-    if (finalHost !== originalHost) {
-      // Still look for the company name branding on the page
-      const $ = cheerio.load(html);
-      const companySlug = (name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-      $("img").each((_, el) => {
-        const src = $(el).attr("src") || "";
-        const alt = ($(el).attr("alt") || "").toLowerCase();
-        const cls = ($(el).attr("class") || "").toLowerCase();
-        if (companySlug && (src + alt + cls).includes(companySlug)) {
-          addCandidate(resolveUrl(finalUrl, src), "logo-attr", `Brand match: ${alt || cls || src}`);
-        }
-      });
+    const origHost = domain.replace(/^www\./, "");
+    if (finalHost !== origHost) {
+      const slug = (name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (slug) {
+        const $ = cheerio.load(html);
+        $("img").each((_, el) => {
+          const src = $(el).attr("src") || "";
+          const alt = ($(el).attr("alt") || "").toLowerCase();
+          const cls = ($(el).attr("class") || "").toLowerCase();
+          if ((src + alt + cls).includes(slug)) addCandidate(resolveUrl(finalUrl, src), "logo-attr", `Brand match: ${alt || cls || src}`);
+        });
+      }
       return;
     }
   } catch {}
@@ -256,35 +348,38 @@ async function scrapeWebsite(domain, name, addCandidate, resolveUrl) {
 async function fetchLogosCandidates(domain, name) {
   const candidates = [];
   const seen = new Set();
-  const addCandidateFn = (url, context, label) => {
+  const add = (url, context, label) => {
     if (!url || seen.has(url) || url.startsWith("data:image/gif")) return;
     seen.add(url);
     candidates.push({ url, context, label, score: scoreCandidate(url, context) });
   };
 
-  // Run all premium sources in parallel
-  const [clearbitUrl, brandfetchUrl, wikiUrl, bingUrls, googleUrls, ddgUrls] = await Promise.all([
+  // All premium sources in parallel
+  const [clearbitUrl, brandfetchUrl, simpleIconsUrl, svgUrl, wikiUrl, bingUrls, googleUrls, ddgUrls] = await Promise.all([
     fetchFromClearbit(domain),
     fetchFromBrandfetch(domain),
+    name ? fetchFromSimpleIcons(name) : Promise.resolve(null),
+    fetchSVGFromDomain(domain),
     name ? fetchFromWikipedia(name) : Promise.resolve(null),
     name ? fetchFromBingImages(name) : Promise.resolve([]),
     name ? fetchFromGoogleImages(name) : Promise.resolve([]),
     name ? fetchFromDuckDuckGo(name) : Promise.resolve([]),
   ]);
 
-  if (clearbitUrl) addCandidateFn(clearbitUrl, "clearbit", "Clearbit (transparent)");
-  if (brandfetchUrl) addCandidateFn(brandfetchUrl, "brandfetch", "Brandfetch (transparent)");
-  if (wikiUrl) addCandidateFn(wikiUrl, "wikipedia", "Wikipedia logo");
-  (bingUrls || []).forEach((u, i) => addCandidateFn(u, "bing-transparent", `Bing Images #${i + 1}`));
-  (googleUrls || []).forEach((u, i) => addCandidateFn(u, "google-transparent", `Google Images #${i + 1}`));
-  (ddgUrls || []).forEach((u, i) => addCandidateFn(u, "duckduckgo-transparent", `DuckDuckGo transparent #${i + 1}`));
+  if (clearbitUrl) add(clearbitUrl, "clearbit", "Clearbit");
+  if (brandfetchUrl) add(brandfetchUrl, "brandfetch", "Brandfetch");
+  if (simpleIconsUrl) add(simpleIconsUrl, "simpleicons", "Simple Icons (SVG)");
+  if (svgUrl) add(svgUrl, "svg-path", "SVG on domain");
+  if (wikiUrl) add(wikiUrl, "wikipedia", "Wikipedia logo");
+  (bingUrls || []).forEach((u, i) => add(u, "bing-transparent", `Bing Images #${i + 1}`));
+  (googleUrls || []).forEach((u, i) => add(u, "google-transparent", `Google Images #${i + 1}`));
+  (ddgUrls || []).forEach((u, i) => add(u, "duckduckgo-transparent", `DuckDuckGo #${i + 1}`));
 
-  // Website scraping as fallback (redirect-aware)
-  await scrapeWebsite(domain, name, addCandidateFn, resolveUrl);
+  await scrapeWebsite(domain, name, add);
 
   candidates.sort((a, b) => b.score - a.score);
   const top = candidates.slice(0, 15);
-  const highConfidence = top.length > 0 && ["clearbit", "brandfetch", "wikipedia"].includes(top[0].context);
+  const highConfidence = top.length > 0 && ["clearbit", "brandfetch", "simpleicons", "svg-path", "wikipedia"].includes(top[0].context);
   return { candidates: top, highConfidence };
 }
 
@@ -295,8 +390,7 @@ app.post("/api/resolve-domain", async (req, res) => {
   if (!name) return res.status(400).json({ error: "name required" });
   const db = loadDB(); const key = name.toLowerCase().trim();
   if (db[key]) return res.json({ domain: db[key].domain, fromCache: true });
-  const domain = await resolveDomain(name);
-  res.json({ domain, fromCache: false });
+  res.json({ domain: await resolveDomain(name), fromCache: false });
 });
 
 app.post("/api/fetch-logos", async (req, res) => {
@@ -304,20 +398,20 @@ app.post("/api/fetch-logos", async (req, res) => {
   if (!domain) return res.status(400).json({ error: "domain required" });
   const db = loadDB(); const key = (name || domain).toLowerCase().trim();
   if (db[key]) return res.json({ fromCache: true, cached: db[key], candidates: [] });
-  const result = await fetchLogosCandidates(domain, name);
-  res.json({ fromCache: false, ...result });
+  res.json({ fromCache: false, ...(await fetchLogosCandidates(domain, name)) });
 });
 
 app.post("/api/cache-logo", async (req, res) => {
   const { name, domain, imageUrl } = req.body;
   if (!name || !domain) return res.status(400).json({ error: "name and domain required" });
   const key = name.toLowerCase().trim(); const safeName = key.replace(/[^a-z0-9]/g, "_");
-  let inputBuffer;
   try {
+    let inputBuffer;
     if (imageUrl.startsWith("data:")) { inputBuffer = Buffer.from(imageUrl.replace(/^data:[^;]+;base64,/, ""), "base64"); }
-    else { const resp = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 8000, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); inputBuffer = Buffer.from(resp.data); }
+    else { const r = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 8000, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); inputBuffer = Buffer.from(r.data); }
     const filename = `${safeName}.png`; const filepath = path.join(CACHE_DIR, filename);
-    await sharp(inputBuffer, { density: 300 }).png().resize(512, 512, { fit: "inside", background: { r: 0, g: 0, b: 0, alpha: 0 } }).toFile(filepath);
+    const finalBuf = await toFinalBuffer(inputBuffer);
+    fs.writeFileSync(filepath, finalBuf);
     const db = loadDB(); db[key] = { name, domain, cachedPath: `/cached-logos/${filename}`, savedAt: new Date().toISOString() }; saveDB(db);
     res.json({ success: true, cachedPath: `/cached-logos/${filename}` });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -328,8 +422,8 @@ app.post("/api/download-png", async (req, res) => {
   try {
     let inputBuffer;
     if (imageUrl.startsWith("data:")) { inputBuffer = Buffer.from(imageUrl.replace(/^data:[^;]+;base64,/, ""), "base64"); }
-    else { const resp = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 8000, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); inputBuffer = Buffer.from(resp.data); }
-    const pngBuffer = await sharp(inputBuffer, { density: 300 }).png().resize(512, 512, { fit: "inside", background: { r: 0, g: 0, b: 0, alpha: 0 } }).toBuffer();
+    else { const r = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 8000, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); inputBuffer = Buffer.from(r.data); }
+    const pngBuffer = await toFinalBuffer(inputBuffer);
     const safeName = (name || "logo").replace(/[^a-z0-9]/gi, "_");
     res.setHeader("Content-Type", "image/png"); res.setHeader("Content-Disposition", `attachment; filename="${safeName}.png"`); res.send(pngBuffer);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -338,10 +432,10 @@ app.post("/api/download-png", async (req, res) => {
 app.post("/api/bulk-download", async (req, res) => {
   const JSZip = require("jszip"); const { companies } = req.body; const zip = new JSZip();
   for (const { name, cachedPath } of companies) {
-    try { const filepath = path.join(__dirname, cachedPath); if (fs.existsSync(filepath)) zip.file(`${name.replace(/[^a-z0-9]/gi, "_")}.png`, fs.readFileSync(filepath)); } catch {}
+    try { const fp = path.join(__dirname, cachedPath); if (fs.existsSync(fp)) zip.file(`${name.replace(/[^a-z0-9]/gi, "_")}.png`, fs.readFileSync(fp)); } catch {}
   }
-  const zipBuffer = await zip.generateAsync({ type: "nodebuffer" });
-  res.setHeader("Content-Type", "application/zip"); res.setHeader("Content-Disposition", 'attachment; filename="logos.zip"'); res.send(zipBuffer);
+  const buf = await zip.generateAsync({ type: "nodebuffer" });
+  res.setHeader("Content-Type", "application/zip"); res.setHeader("Content-Disposition", 'attachment; filename="logos.zip"'); res.send(buf);
 });
 
 app.listen(PORT, () => console.log(`✅ Logo Tool backend running at http://localhost:${PORT}`));

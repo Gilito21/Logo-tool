@@ -289,33 +289,21 @@ function scoreCandidate(url, context) {
   return score;
 }
 
-async function scrapeWebsite(domain, name, add) {
-  const baseUrl = `https://${domain}`;
-  let html = "", finalUrl = baseUrl;
-  try {
-    const r = await axios.get(baseUrl, { timeout: 8000, maxRedirects: 5, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120", Accept: "text/html" } });
-    html = r.data; finalUrl = r.request?.res?.responseUrl || baseUrl;
-  } catch {
-    try { const r = await axios.get(`http://${domain}`, { timeout: 8000, maxRedirects: 5, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); html = r.data; finalUrl = r.request?.res?.responseUrl || `http://${domain}`; } catch {}
-  }
+async function scrapeWebsiteFromHomepage({ html, finalUrl, isRedirected }, domain, name, add) {
   if (!html) return;
 
-  // If redirected to a different domain, only look for company-name-specific images
-  try {
-    const finalHost = new URL(finalUrl).hostname.replace(/^www\./, "");
-    const origHost = domain.replace(/^www\./, "");
-    if (finalHost !== origHost) {
-      const slug = (name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-      if (slug) {
-        const $ = cheerio.load(html);
-        $("img").each((_, el) => {
-          const src = $(el).attr("src") || ""; const alt = ($(el).attr("alt") || "").toLowerCase(); const cls = ($(el).attr("class") || "").toLowerCase();
-          if ((src + alt + cls).includes(slug)) add(resolveUrl(finalUrl, src), "logo-attr", `Brand match: ${alt || cls || src}`);
-        });
-      }
-      return;
+  // If redirected to a different domain, only look for images containing the company name
+  if (isRedirected) {
+    const slug = (name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (slug) {
+      const $ = cheerio.load(html);
+      $("img").each((_, el) => {
+        const src = $(el).attr("src") || ""; const alt = ($(el).attr("alt") || "").toLowerCase(); const cls = ($(el).attr("class") || "").toLowerCase();
+        if ((src + alt + cls).includes(slug)) add(resolveUrl(finalUrl, src), "logo-attr", `Brand match: ${alt || cls || src}`);
+      });
     }
-  } catch {}
+    return;
+  }
 
   const $ = cheerio.load(html);
   const ogImage = $('meta[property="og:image"]').attr("content");
@@ -336,6 +324,23 @@ async function scrapeWebsite(domain, name, add) {
   add(`https://${domain}/favicon.ico`, "favicon", "Favicon");
 }
 
+// Returns { html, finalUrl, isRedirected } — shared between redirect check and scrapeWebsite
+async function fetchHomepage(domain) {
+  for (const base of [`https://${domain}`, `http://${domain}`]) {
+    try {
+      const r = await axios.get(base, {
+        timeout: 8000, maxRedirects: 5, httpsAgent,
+        headers: { "User-Agent": "Mozilla/5.0 Chrome/120", Accept: "text/html" },
+      });
+      const finalUrl = r.request?.res?.responseUrl || base;
+      const finalHost = new URL(finalUrl).hostname.replace(/^www\./, "");
+      const origHost = domain.replace(/^www\./, "");
+      return { html: r.data, finalUrl, isRedirected: finalHost !== origHost };
+    } catch {}
+  }
+  return { html: "", finalUrl: `https://${domain}`, isRedirected: false };
+}
+
 async function fetchLogosCandidates(domain, name) {
   const candidates = [];
   const seen = new Set();
@@ -345,23 +350,34 @@ async function fetchLogosCandidates(domain, name) {
     candidates.push({ url, context, label, score: scoreCandidate(url, context) });
   };
 
-  const [clearbitUrl, brandfetchUrl, wikiUrl, bingUrls, googleUrls, ddgUrls] = await Promise.all([
-    fetchFromClearbit(domain),
-    fetchFromBrandfetch(domain),
+  // Fetch homepage first to detect cross-domain redirects.
+  // If netrivals.com → lengow.com, Clearbit/Brandfetch would return Lengow's logo — skip them.
+  const homepagePromise = fetchHomepage(domain);
+
+  const [homepage, wikiUrl, bingUrls, googleUrls, ddgUrls] = await Promise.all([
+    homepagePromise,
     name ? fetchFromWikipedia(name) : Promise.resolve(null),
     name ? fetchFromBingImages(name) : Promise.resolve([]),
     name ? fetchFromGoogleImages(name) : Promise.resolve([]),
     name ? fetchFromDuckDuckGo(name) : Promise.resolve([]),
   ]);
 
-  if (clearbitUrl) add(clearbitUrl, "clearbit", "Clearbit");
-  if (brandfetchUrl) add(brandfetchUrl, "brandfetch", "Brandfetch");
+  // Only use domain-based logo APIs when the domain actually belongs to the company
+  if (!homepage.isRedirected) {
+    const [clearbitUrl, brandfetchUrl] = await Promise.all([
+      fetchFromClearbit(domain),
+      fetchFromBrandfetch(domain),
+    ]);
+    if (clearbitUrl) add(clearbitUrl, "clearbit", "Clearbit");
+    if (brandfetchUrl) add(brandfetchUrl, "brandfetch", "Brandfetch");
+  }
+
   if (wikiUrl) add(wikiUrl, "wikipedia", "Wikipedia");
   (bingUrls || []).forEach((u, i) => add(u, "bing-transparent", `Bing #${i + 1}`));
   (googleUrls || []).forEach((u, i) => add(u, "google-transparent", `Google Images #${i + 1}`));
   (ddgUrls || []).forEach((u, i) => add(u, "duckduckgo-transparent", `DuckDuckGo #${i + 1}`));
 
-  await scrapeWebsite(domain, name, add);
+  await scrapeWebsiteFromHomepage(homepage, domain, name, add);
 
   candidates.sort((a, b) => b.score - a.score);
   const top = candidates.slice(0, 15);

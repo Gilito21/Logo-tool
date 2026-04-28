@@ -28,55 +28,40 @@ const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
   "Accept-Language": "en-US,en;q=0.9",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Connection": "keep-alive",
 };
 
 // ── Background removal via flood-fill from corners ────────────────────────────
-// Removes solid-color backgrounds (white, light gray, etc.) making logo transparent.
 async function removeBackground(inputBuffer) {
   try {
-    const { data, info } = await sharp(inputBuffer)
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-
+    const { data, info } = await sharp(inputBuffer).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     const { width, height } = info;
     const px = new Uint8Array(data);
     const idx = (x, y) => (y * width + x) * 4;
 
-    const corners = [
-      [0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1],
-    ].map(([x, y]) => {
-      const i = idx(x, y);
-      return { r: px[i], g: px[i + 1], b: px[i + 2] };
-    });
+    const corners = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]]
+      .map(([x, y]) => { const i = idx(x, y); return { r: px[i], g: px[i + 1], b: px[i + 2], a: px[i + 3] }; });
 
-    // Only remove background if all corners agree on a near-uniform color
+    // Abort if corners are already transparent or all very dark (intentional bg)
+    if (corners.every(c => c.a < 10)) return inputBuffer;
+
     const avg = {
       r: Math.round(corners.reduce((s, c) => s + c.r, 0) / 4),
       g: Math.round(corners.reduce((s, c) => s + c.g, 0) / 4),
       b: Math.round(corners.reduce((s, c) => s + c.b, 0) / 4),
     };
-    const spread = corners.every(c =>
-      Math.abs(c.r - avg.r) < 15 && Math.abs(c.g - avg.g) < 15 && Math.abs(c.b - avg.b) < 15
-    );
-    // Skip if all corners are already transparent or background is very dark (likely intentional)
-    const allTransparent = corners.every((_, i) => { const ii = idx(corners[i < 2 ? 0 : i % 2 === 0 ? 2 : 3][0], corners[i < 2 ? 0 : i % 2 === 0 ? 2 : 3][1]); return px[ii + 3] < 10; });
-    if (!spread || allTransparent || (avg.r < 30 && avg.g < 30 && avg.b < 30)) return inputBuffer;
+    if (avg.r < 30 && avg.g < 30 && avg.b < 30) return inputBuffer;
+    if (!corners.every(c => Math.abs(c.r - avg.r) < 15 && Math.abs(c.g - avg.g) < 15 && Math.abs(c.b - avg.b) < 15)) return inputBuffer;
 
     const thr = 30;
     const match = (x, y) => {
-      const i = idx(x, y);
-      return px[i + 3] > 10 &&
-        Math.abs(px[i] - avg.r) < thr &&
-        Math.abs(px[i + 1] - avg.g) < thr &&
-        Math.abs(px[i + 2] - avg.b) < thr;
+      const i = idx(x, y); return px[i + 3] > 10 &&
+        Math.abs(px[i] - avg.r) < thr && Math.abs(px[i + 1] - avg.g) < thr && Math.abs(px[i + 2] - avg.b) < thr;
     };
-
-    // Flood-fill from all 4 corners
     const visited = new Uint8Array(width * height);
     const queue = [[0, 0], [width - 1, 0], [0, height - 1], [width - 1, height - 1]];
     queue.forEach(([x, y]) => { visited[y * width + x] = 1; });
-
     while (queue.length) {
       const [x, y] = queue.pop();
       px[idx(x, y) + 3] = 0;
@@ -88,17 +73,13 @@ async function removeBackground(inputBuffer) {
         if (match(nx, ny)) queue.push([nx, ny]);
       }
     }
-
     return await sharp(Buffer.from(px), { raw: { width, height, channels: 4 } }).png().toBuffer();
-  } catch {
-    return inputBuffer;
-  }
+  } catch { return inputBuffer; }
 }
 
 async function toFinalBuffer(inputBuffer) {
-  const withoutBg = await removeBackground(inputBuffer);
-  return sharp(withoutBg, { density: 300 })
-    .png()
+  const clean = await removeBackground(inputBuffer);
+  return sharp(clean, { density: 300 }).png()
     .resize(512, 512, { fit: "inside", background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .toBuffer();
 }
@@ -108,7 +89,7 @@ async function fetchFromClearbit(domain) {
   const url = `https://logo.clearbit.com/${domain}?size=512`;
   try {
     const r = await axios.get(url, { responseType: "arraybuffer", timeout: 6000, validateStatus: s => s === 200, httpsAgent });
-    if (r.data && r.data.length > 500) return url;
+    if (r.data?.length > 500) return url;
   } catch {}
   return null;
 }
@@ -121,117 +102,110 @@ async function fetchFromBrandfetch(domain) {
   ]) {
     try {
       const r = await axios.get(url, { responseType: "arraybuffer", timeout: 6000, validateStatus: s => s === 200, httpsAgent });
-      if (r.data && r.data.length > 500) return url;
+      if (r.data?.length > 500) return url;
     } catch {}
   }
   return null;
 }
 
-// ── Source 3: Simple Icons (SVGs for thousands of brands) ─────────────────────
-async function fetchFromSimpleIcons(companyName) {
-  const slug = companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const url = `https://cdn.simpleicons.org/${slug}`;
-  try {
-    const r = await axios.get(url, { timeout: 5000, validateStatus: s => s === 200, headers: BROWSER_HEADERS });
-    if (r.data && typeof r.data === "string" && r.data.includes("<svg")) return url;
-  } catch {}
-  return null;
-}
-
-// ── Source 4: SVG path hunting on the company domain ─────────────────────────
-async function fetchSVGFromDomain(domain) {
-  const paths = [
-    "/logo.svg", "/images/logo.svg", "/img/logo.svg", "/assets/logo.svg",
-    "/static/logo.svg", "/favicon.svg", "/assets/images/logo.svg",
-    "/static/images/logo.svg", "/dist/logo.svg", "/public/logo.svg",
-    "/media/logo.svg", "/content/logo.svg", "/theme/logo.svg",
-    "/wp-content/themes/logo.svg", "/brand/logo.svg",
-  ];
-  const results = await Promise.allSettled(
-    paths.map(async (p) => {
-      const url = `https://${domain}${p}`;
-      const r = await axios.get(url, {
-        timeout: 3000, validateStatus: s => s === 200, httpsAgent,
-        headers: { "User-Agent": "Mozilla/5.0 Chrome/120" },
-      });
-      const ct = r.headers["content-type"] || "";
-      if (ct.includes("svg") || (typeof r.data === "string" && r.data.trim().startsWith("<svg"))) return url;
-      throw new Error("not svg");
-    })
-  );
-  const found = results.find(r => r.status === "fulfilled");
-  return found ? found.value : null;
-}
-
-// ── Source 5: Wikipedia infobox logo ─────────────────────────────────────────
-async function fetchFromWikipedia(companyName) {
-  try {
-    const s = await axios.get("https://en.wikipedia.org/w/api.php", {
-      params: { action: "query", list: "search", srsearch: companyName, format: "json", srlimit: 3 },
-      timeout: 7000,
-    });
-    const results = s.data?.query?.search;
-    if (!results?.length) return null;
-    const p = await axios.get("https://en.wikipedia.org/w/api.php", {
-      params: { action: "query", prop: "pageimages", titles: results[0].title, format: "json", pithumbsize: 512, piprop: "original|thumbnail" },
-      timeout: 7000,
-    });
-    const page = Object.values(p.data?.query?.pages || {})[0];
-    const src = page?.original?.source || page?.thumbnail?.source;
-    if (src && /\.(svg|png)/i.test(src)) return src;
-  } catch {}
-  return null;
-}
-
-// ── Source 6: Bing Images – transparent filter ────────────────────────────────
+// ── Source 3: Bing Images (primary image search) ───────────────────────────────
+// Bing is the most scraper-friendly engine. We try two queries per company:
+// one with transparent filter and one without (relying on bg removal as fallback).
 async function fetchFromBingImages(companyName) {
-  try {
-    const r = await axios.get("https://www.bing.com/images/search", {
-      params: { q: `${companyName} logo`, qft: "+filterui:photo-transparent", form: "IRFLTR" },
-      headers: BROWSER_HEADERS,
-      timeout: 10000,
-    });
-    const urls = [];
-    const re = /"murl"\s*:\s*"(https?:\/\/(?!(?:www\.bing|tse\d*\.mm\.bing|msn\.com))[^"]{10,600})"/g;
-    let m;
-    while ((m = re.exec(r.data)) !== null) {
-      const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
-      if (!urls.includes(u)) urls.push(u);
-      if (urls.length >= 8) break;
-    }
-    return urls;
-  } catch { return []; }
-}
+  const urls = [];
+  const seen = new Set();
 
-// ── Source 7: Google Images – transparent filter ──────────────────────────────
-async function fetchFromGoogleImages(companyName) {
-  try {
-    const r = await axios.get("https://www.google.com/search", {
-      params: { q: `${companyName} logo`, tbm: "isch", tbs: "ic:trans", hl: "en", gl: "us" },
-      headers: { ...BROWSER_HEADERS, "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+412; SOCS=CAISHAgBEhIaAB;" },
-      timeout: 10000,
-    });
-    const urls = [];
-    const re1 = /"ou"\s*:\s*"(https?:\/\/(?!(?:www\.google|encrypted-tbn|gstatic|doubleclick))[^"]+)"/g;
-    let m;
-    while ((m = re1.exec(r.data)) !== null) {
-      const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
-      if (!urls.includes(u)) urls.push(u);
-      if (urls.length >= 8) break;
-    }
-    if (urls.length < 3) {
-      const re2 = /"(https?:\/\/(?!(?:www\.google|encrypted-tbn|gstatic|doubleclick))[^"]{15,400}\.(?:png|svg)[^"]*)"/g;
-      while ((m = re2.exec(r.data)) !== null) {
+  // Query 1: transparent filter
+  // Query 2: no filter (catches logos that exist but aren't tagged transparent)
+  const queries = [
+    { q: `${companyName} logo`, qft: "+filterui:photo-transparent", form: "IRFLTR" },
+    { q: `${companyName} logo`, qft: "", form: "HDRSC2" },
+  ];
+
+  for (const params of queries) {
+    try {
+      const r = await axios.get("https://www.bing.com/images/search", {
+        params, headers: BROWSER_HEADERS, timeout: 10000,
+      });
+
+      // Method A: murl field in JSON blobs (original image URL)
+      const re1 = /"murl"\s*:\s*"(https?:\/\/[^"]{10,800})"/g;
+      let m;
+      while ((m = re1.exec(r.data)) !== null) {
         const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
-        if (!urls.includes(u)) urls.push(u);
-        if (urls.length >= 8) break;
+        if (!seen.has(u) && !u.includes("bing.com") && !u.includes("msn.com")) {
+          seen.add(u); urls.push(u);
+        }
+        if (urls.length >= 12) break;
       }
-    }
-    return urls;
-  } catch { return []; }
+
+      // Method B: mediaurl in href params (fallback)
+      if (urls.length < 3) {
+        const re2 = /[?&]mediaurl=([^&"]{10,800})/g;
+        while ((m = re2.exec(r.data)) !== null) {
+          try {
+            const u = decodeURIComponent(m[1]);
+            if (!seen.has(u) && !u.includes("bing.com")) { seen.add(u); urls.push(u); }
+            if (urls.length >= 12) break;
+          } catch {}
+        }
+      }
+    } catch {}
+
+    if (urls.length >= 6) break; // Enough results from first query
+  }
+
+  return urls;
 }
 
-// ── Source 8: DuckDuckGo images – transparent filter ─────────────────────────
+// ── Source 4: Google Images ───────────────────────────────────────────────────
+// Searches with transparent filter first, then falls back to general search.
+async function fetchFromGoogleImages(companyName) {
+  const urls = [];
+  const seen = new Set();
+
+  const queries = [
+    { q: `${companyName} logo`, tbm: "isch", tbs: "ic:trans", hl: "en", gl: "us" },
+    { q: `${companyName} logo`, tbm: "isch", hl: "en", gl: "us" },
+  ];
+
+  for (const params of queries) {
+    try {
+      const r = await axios.get("https://www.google.com/search", {
+        params,
+        headers: { ...BROWSER_HEADERS, "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+412; SOCS=CAISHAgBEhIaAB;" },
+        timeout: 10000,
+      });
+
+      // Method A: "ou" field = original URL in Google Images JSON
+      const re1 = /"ou"\s*:\s*"(https?:\/\/(?!(?:www\.google|encrypted-tbn|gstatic|doubleclick))[^"]{10,800})"/g;
+      let m;
+      while ((m = re1.exec(r.data)) !== null) {
+        const u = m[1].replace(/\\u003d/g, "=").replace(/\\u0026/g, "&");
+        if (!seen.has(u)) { seen.add(u); urls.push(u); }
+        if (urls.length >= 12) break;
+      }
+
+      // Method B: imgurl= in data-lpage or href params
+      if (urls.length < 3) {
+        const re2 = /[?&]imgurl=([^&"]{10,800})/g;
+        while ((m = re2.exec(r.data)) !== null) {
+          try {
+            const u = decodeURIComponent(m[1]);
+            if (!seen.has(u) && !u.includes("google")) { seen.add(u); urls.push(u); }
+            if (urls.length >= 12) break;
+          } catch {}
+        }
+      }
+    } catch {}
+
+    if (urls.length >= 6) break;
+  }
+
+  return urls;
+}
+
+// ── Source 5: DuckDuckGo images ───────────────────────────────────────────────
 async function fetchFromDuckDuckGo(companyName) {
   try {
     const init = await axios.get("https://duckduckgo.com/", {
@@ -245,8 +219,28 @@ async function fetchFromDuckDuckGo(companyName) {
       headers: { ...BROWSER_HEADERS, Referer: "https://duckduckgo.com/" },
       timeout: 8000,
     });
-    return (imgs.data?.results || []).slice(0, 6).map(r => r.image).filter(Boolean);
+    return (imgs.data?.results || []).slice(0, 8).map(r => r.image).filter(Boolean);
   } catch { return []; }
+}
+
+// ── Source 6: Wikipedia ───────────────────────────────────────────────────────
+async function fetchFromWikipedia(companyName) {
+  try {
+    const s = await axios.get("https://en.wikipedia.org/w/api.php", {
+      params: { action: "query", list: "search", srsearch: companyName, format: "json", srlimit: 1 },
+      timeout: 7000,
+    });
+    const title = s.data?.query?.search?.[0]?.title;
+    if (!title) return null;
+    const p = await axios.get("https://en.wikipedia.org/w/api.php", {
+      params: { action: "query", prop: "pageimages", titles: title, format: "json", pithumbsize: 512, piprop: "original|thumbnail" },
+      timeout: 7000,
+    });
+    const page = Object.values(p.data?.query?.pages || {})[0];
+    const src = page?.original?.source || page?.thumbnail?.source;
+    if (src && /\.(svg|png)/i.test(src)) return src;
+  } catch {}
+  return null;
 }
 
 function guessDomainsForCompany(name) {
@@ -278,14 +272,13 @@ function resolveUrl(base, rel) {
 function scoreCandidate(url, context) {
   if (context === "clearbit") return 230;
   if (context === "brandfetch") return 220;
-  if (context === "simpleicons") return 215;
-  if (context === "svg-path") return 210;
-  if (context === "wikipedia") return 190;
-  if (context === "bing-transparent") return 160;
-  if (context === "google-transparent") return 150;
-  if (context === "duckduckgo-transparent") return 130;
-  let score = 0;
+  if (context === "wikipedia") return 180;
+  // Image search results: prefer SVG/PNG, penalize JPG
   const u = (url || "").toLowerCase();
+  if (context === "bing-transparent") return u.endsWith(".svg") ? 175 : u.endsWith(".png") ? 165 : 140;
+  if (context === "google-transparent") return u.endsWith(".svg") ? 170 : u.endsWith(".png") ? 160 : 135;
+  if (context === "duckduckgo-transparent") return u.endsWith(".svg") ? 165 : u.endsWith(".png") ? 155 : 130;
+  let score = 0;
   if (/logo|brand|wordmark/.test(u)) score += 40;
   if (context === "og:image") score += 30;
   if (context === "apple-touch-icon") score += 25;
@@ -296,7 +289,7 @@ function scoreCandidate(url, context) {
   return score;
 }
 
-async function scrapeWebsite(domain, name, addCandidate) {
+async function scrapeWebsite(domain, name, add) {
   const baseUrl = `https://${domain}`;
   let html = "", finalUrl = baseUrl;
   try {
@@ -316,10 +309,8 @@ async function scrapeWebsite(domain, name, addCandidate) {
       if (slug) {
         const $ = cheerio.load(html);
         $("img").each((_, el) => {
-          const src = $(el).attr("src") || "";
-          const alt = ($(el).attr("alt") || "").toLowerCase();
-          const cls = ($(el).attr("class") || "").toLowerCase();
-          if ((src + alt + cls).includes(slug)) addCandidate(resolveUrl(finalUrl, src), "logo-attr", `Brand match: ${alt || cls || src}`);
+          const src = $(el).attr("src") || ""; const alt = ($(el).attr("alt") || "").toLowerCase(); const cls = ($(el).attr("class") || "").toLowerCase();
+          if ((src + alt + cls).includes(slug)) add(resolveUrl(finalUrl, src), "logo-attr", `Brand match: ${alt || cls || src}`);
         });
       }
       return;
@@ -328,21 +319,21 @@ async function scrapeWebsite(domain, name, addCandidate) {
 
   const $ = cheerio.load(html);
   const ogImage = $('meta[property="og:image"]').attr("content");
-  if (ogImage) addCandidate(resolveUrl(finalUrl, ogImage), "og:image", "OG Image");
-  $('link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]').each((_, el) => addCandidate(resolveUrl(finalUrl, $(el).attr("href")), "apple-touch-icon", "Apple Touch Icon"));
-  $('link[rel~="icon"]').each((_, el) => { const href = $(el).attr("href"); if (href && !href.endsWith(".ico")) addCandidate(resolveUrl(finalUrl, href), "icon", "Site Icon"); });
+  if (ogImage) add(resolveUrl(finalUrl, ogImage), "og:image", "OG Image");
+  $('link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]').each((_, el) => add(resolveUrl(finalUrl, $(el).attr("href")), "apple-touch-icon", "Apple Touch Icon"));
+  $('link[rel~="icon"]').each((_, el) => { const href = $(el).attr("href"); if (href && !href.endsWith(".ico")) add(resolveUrl(finalUrl, href), "icon", "Site Icon"); });
   $("header, nav, [role='banner'], .header, .navbar, .nav, #header, #navbar").each((_, section) => {
     $(section).find("img, svg").each((_, el) => {
       const tag = el.tagName.toLowerCase();
-      if (tag === "img") { const src = $(el).attr("src"); const r = resolveUrl(finalUrl, src); if (r) addCandidate(r, "header-img", `Header: ${$(el).attr("alt") || $(el).attr("class") || "img"}`); }
-      if (tag === "svg") { const svgHtml = $.html(el); if (svgHtml && svgHtml.length > 100 && svgHtml.length < 80000) { const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svgHtml).toString("base64")}`; addCandidate(dataUrl, "inline-svg", "Inline SVG (header)"); } }
+      if (tag === "img") { const src = $(el).attr("src"); const r = resolveUrl(finalUrl, src); if (r) add(r, "header-img", `Header: ${$(el).attr("alt") || $(el).attr("class") || "img"}`); }
+      if (tag === "svg") { const svgHtml = $.html(el); if (svgHtml && svgHtml.length > 100 && svgHtml.length < 80000) add(`data:image/svg+xml;base64,${Buffer.from(svgHtml).toString("base64")}`, "inline-svg", "Inline SVG (header)"); }
     });
   });
   $("img").each((_, el) => {
     const src = $(el).attr("src") || ""; const alt = ($(el).attr("alt") || "").toLowerCase(); const cls = ($(el).attr("class") || "").toLowerCase(); const id = ($(el).attr("id") || "").toLowerCase();
-    if (/logo|brand|wordmark/.test(src + alt + cls + id)) addCandidate(resolveUrl(finalUrl, src), "logo-attr", `Logo attr: ${alt || cls || id}`);
+    if (/logo|brand|wordmark/.test(src + alt + cls + id)) add(resolveUrl(finalUrl, src), "logo-attr", `Logo attr: ${alt || cls || id}`);
   });
-  addCandidate(`https://${domain}/favicon.ico`, "favicon", "Favicon");
+  add(`https://${domain}/favicon.ico`, "favicon", "Favicon");
 }
 
 async function fetchLogosCandidates(domain, name) {
@@ -354,12 +345,9 @@ async function fetchLogosCandidates(domain, name) {
     candidates.push({ url, context, label, score: scoreCandidate(url, context) });
   };
 
-  // All premium sources in parallel
-  const [clearbitUrl, brandfetchUrl, simpleIconsUrl, svgUrl, wikiUrl, bingUrls, googleUrls, ddgUrls] = await Promise.all([
+  const [clearbitUrl, brandfetchUrl, wikiUrl, bingUrls, googleUrls, ddgUrls] = await Promise.all([
     fetchFromClearbit(domain),
     fetchFromBrandfetch(domain),
-    name ? fetchFromSimpleIcons(name) : Promise.resolve(null),
-    fetchSVGFromDomain(domain),
     name ? fetchFromWikipedia(name) : Promise.resolve(null),
     name ? fetchFromBingImages(name) : Promise.resolve([]),
     name ? fetchFromGoogleImages(name) : Promise.resolve([]),
@@ -368,10 +356,8 @@ async function fetchLogosCandidates(domain, name) {
 
   if (clearbitUrl) add(clearbitUrl, "clearbit", "Clearbit");
   if (brandfetchUrl) add(brandfetchUrl, "brandfetch", "Brandfetch");
-  if (simpleIconsUrl) add(simpleIconsUrl, "simpleicons", "Simple Icons (SVG)");
-  if (svgUrl) add(svgUrl, "svg-path", "SVG on domain");
-  if (wikiUrl) add(wikiUrl, "wikipedia", "Wikipedia logo");
-  (bingUrls || []).forEach((u, i) => add(u, "bing-transparent", `Bing Images #${i + 1}`));
+  if (wikiUrl) add(wikiUrl, "wikipedia", "Wikipedia");
+  (bingUrls || []).forEach((u, i) => add(u, "bing-transparent", `Bing #${i + 1}`));
   (googleUrls || []).forEach((u, i) => add(u, "google-transparent", `Google Images #${i + 1}`));
   (ddgUrls || []).forEach((u, i) => add(u, "duckduckgo-transparent", `DuckDuckGo #${i + 1}`));
 
@@ -379,7 +365,7 @@ async function fetchLogosCandidates(domain, name) {
 
   candidates.sort((a, b) => b.score - a.score);
   const top = candidates.slice(0, 15);
-  const highConfidence = top.length > 0 && ["clearbit", "brandfetch", "simpleicons", "svg-path", "wikipedia"].includes(top[0].context);
+  const highConfidence = top.length > 0 && ["clearbit", "brandfetch", "wikipedia"].includes(top[0].context);
   return { candidates: top, highConfidence };
 }
 
@@ -410,8 +396,7 @@ app.post("/api/cache-logo", async (req, res) => {
     if (imageUrl.startsWith("data:")) { inputBuffer = Buffer.from(imageUrl.replace(/^data:[^;]+;base64,/, ""), "base64"); }
     else { const r = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 8000, httpsAgent, headers: { "User-Agent": "Mozilla/5.0 Chrome/120" } }); inputBuffer = Buffer.from(r.data); }
     const filename = `${safeName}.png`; const filepath = path.join(CACHE_DIR, filename);
-    const finalBuf = await toFinalBuffer(inputBuffer);
-    fs.writeFileSync(filepath, finalBuf);
+    fs.writeFileSync(filepath, await toFinalBuffer(inputBuffer));
     const db = loadDB(); db[key] = { name, domain, cachedPath: `/cached-logos/${filename}`, savedAt: new Date().toISOString() }; saveDB(db);
     res.json({ success: true, cachedPath: `/cached-logos/${filename}` });
   } catch (err) { res.status(500).json({ error: err.message }); }

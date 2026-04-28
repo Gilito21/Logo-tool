@@ -141,7 +141,7 @@ async function startFetch() {
       const res = await api("/api/fetch-logos", { domain: state[name].domain, name });
       if (res.fromCache) { state[name].status = "cached"; state[name].selectedUrl = res.cached.cachedPath; state[name].cachedPath = res.cached.cachedPath; }
       else if (!res.candidates || res.candidates.length === 0) { state[name].status = "failed"; }
-      else { state[name].candidates = res.candidates; state[name].selectedUrl = res.candidates[0].url; state[name].status = res.candidates.length === 1 ? "found" : "multi"; }
+      else { state[name].candidates = res.candidates; state[name].selectedUrl = res.candidates[0].url; state[name].source = res.candidates[0].context; state[name].status = (res.highConfidence || res.candidates.length === 1) ? "found" : "multi"; }
     } catch { state[name].status = "failed"; }
     renderCard(name);
   }
@@ -152,7 +152,9 @@ async function startFetch() {
 function renderGrid() { const grid = document.getElementById("logoGrid"); grid.innerHTML = ""; Object.keys(state).forEach(name => { const div = document.createElement("div"); div.id = `card-${slugify(name)}`; div.className = "card"; grid.appendChild(div); renderCard(name); }); updateGridCount(); }
 function renderCard(name) {
   const s = state[name]; const id = slugify(name); const el = document.getElementById(`card-${id}`); if (!el) return;
-  const badgeMap = { loading: ["badge-loading","● Processing"], found: ["badge-found","✓ Found"], multi: ["badge-multi","⚡ Multiple candidates"], review: ["badge-review","⚠ Needs review"], failed: ["badge-failed","✗ Failed"], cached: ["badge-cached","✓ Cached"] };
+  const sourceLabel = { clearbit: "Clearbit", wikipedia: "Wikipedia", "google-transparent": "Google Images", "duckduckgo-transparent": "DuckDuckGo" };
+  const foundLabel = s.source && sourceLabel[s.source] ? `✓ ${sourceLabel[s.source]}` : "✓ Found";
+  const badgeMap = { loading: ["badge-loading","● Processing"], found: ["badge-found", foundLabel], multi: ["badge-multi","⚡ Multiple candidates"], review: ["badge-review","⚠ Needs review"], failed: ["badge-failed","✗ Failed"], cached: ["badge-cached","✓ Cached"] };
   const [badgeCls, badgeTxt] = badgeMap[s.status] || badgeMap.review;
   let previewHtml = `<div class="placeholder">No logo found</div>`;
   if (s.status === "loading") previewHtml = `<div class="spinner"></div>`;
@@ -166,7 +168,7 @@ function renderCard(name) {
   el.innerHTML = `<div class="card-preview">${previewHtml}</div><div class="card-body"><div class="card-name" title="${name}">${name}</div><div class="card-domain"><input id="domain-${id}" type="text" value="${s.domain}" placeholder="company.com" onblur="updateDomain('${name}', this.value)" /></div><span class="badge ${badgeCls}">${badgeTxt}</span></div>${candidatesHtml}${actionsHtml}`;
 }
 function updateGridCount() { const total = Object.keys(state).length; const found = Object.values(state).filter(s => s.selectedUrl).length; document.getElementById("gridCount").textContent = `${found} / ${total} logos found`; }
-function selectCandidate(name, idx) { state[name].selectedUrl = state[name].candidates[idx].url; state[name].status = "review"; renderCard(name); }
+function selectCandidate(name, idx) { state[name].selectedUrl = state[name].candidates[idx].url; state[name].source = state[name].candidates[idx].context; state[name].status = "review"; renderCard(name); }
 function updateDomain(name, domain) { if (state[name]) state[name].domain = domain.trim(); }
 async function saveLogo(name) { const s = state[name]; if (!s.selectedUrl) return; toast(`Saving ${name}…`); try { const res = await api("/api/cache-logo", { name, domain: s.domain, imageUrl: s.selectedUrl }); if (res.success) { state[name].cachedPath = res.cachedPath; state[name].selectedUrl = res.cachedPath; state[name].status = "cached"; renderCard(name); toast(`✓ ${name} saved to cache`); updateBulkBtn(); } } catch { toast("Save failed"); } }
 async function downloadPng(name) { const s = state[name]; if (!s.selectedUrl) return; toast(`Preparing PNG for ${name}…`); try { const r = await fetch(API + "/api/download-png", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageUrl: s.selectedUrl.startsWith("/") ? API + s.selectedUrl : s.selectedUrl, name }) }); const blob = await r.blob(); const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `${slugify(name)}.png`; a.click(); URL.revokeObjectURL(a.href); } catch { toast("Download failed"); } }
